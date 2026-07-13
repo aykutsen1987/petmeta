@@ -2,12 +2,17 @@
 
 `findings` alanı JSON olarak tutulur (bkz. schemas/analysis.py -> AiFindingSchema listesi).
 Bu sayede her analiz için değişken sayıda bulgu (condition/probability/risk) esnek şekilde saklanabilir.
+
+NOT: Yapay zekâ analizi hesap/giriş gerektirmez (bkz. routers/analysis.py). Bu yüzden
+`pet_id`, backend'deki `pets` tablosuna bir foreign key DEĞİLDİR — yalnızca istemcinin
+(Android'in kendi yerel Room veritabanındaki) referans kimliğidir ve backend'de yalnızca
+kayıt/loglama amacıyla saklanır. Aynı sebeple bu tabloda bir `user_id` alanı yoktur.
 """
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import JSON, DateTime, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
 
@@ -21,8 +26,8 @@ class Analysis(Base):
     __tablename__ = "analyses"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    pet_id: Mapped[str] = mapped_column(String(36), ForeignKey("pets.id", ondelete="CASCADE"), index=True)
-    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    # İstemcinin (Android) kendi yerel pet kimliği; backend'de bir foreign key değildir.
+    pet_id: Mapped[str] = mapped_column(String(64), index=True)
 
     photo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     findings: Mapped[list] = mapped_column(JSON, default=list)
@@ -36,5 +41,3 @@ class Analysis(Base):
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
 
-    pet = relationship("Pet", back_populates="analyses")
-    user = relationship("User", back_populates="analyses")

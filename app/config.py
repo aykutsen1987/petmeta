@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 8
     upload_dir: str = "uploads"
 
+    # ---------- Yapay Zekâ Analizi - Kötüye Kullanım Koruması ----------
+    # Analiz endpoint'i artık hesap/giriş gerektirmediğinden (bkz. routers/analysis.py),
+    # aynı IP adresinin günde en fazla kaç analiz isteği yapabileceğini sınırlar.
+    # 0 veya negatif bir değer limiti tamamen devre dışı bırakır.
+    analysis_daily_limit_per_ip: int = 5
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @property

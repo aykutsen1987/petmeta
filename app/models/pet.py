@@ -45,4 +45,3 @@ class Pet(Base):
     water_logs = relationship("WaterLog", back_populates="pet", cascade="all, delete-orphan")
     exercise_logs = relationship("ExerciseLog", back_populates="pet", cascade="all, delete-orphan")
     weight_logs = relationship("WeightLog", back_populates="pet", cascade="all, delete-orphan")
-    analyses = relationship("Analysis", back_populates="pet", cascade="all, delete-orphan")

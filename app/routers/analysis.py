@@ -1,8 +1,15 @@
 """
-Yapay zekâ analizi uç noktaları - Android PetMetaApiService.analyzePhoto/getAnalysisHistory ile eşleşir (Grup 3).
+Yapay zekâ analizi uç noktaları - Android PetMetaApiService.analyzePhoto/getAnalysisHistory ile eşleşir.
 
 Groq API anahtarı YALNIZCA burada, backend tarafında kullanılır; Android
 istemcisi yalnızca fotoğrafı ve pet_id'yi gönderir (bkz. ai_service.py).
+
+NOT (hesapsız/girişsiz kullanım): Bu uç noktalar bilinçli olarak hesap/giriş
+gerektirmez — analiz geçmişi zaten yalnızca Android'in kendi yerel Room
+veritabanında tutulur (bkz. AnalysisRepository.kt), backend yalnızca tek
+seferlik Groq çağrısı için kullanılır. Kötüye kullanımı/aşırı Groq maliyetini
+önlemek için basit bir IP bazlı günlük istek limiti uygulanır
+(bkz. services/rate_limiter.py, ayar: ANALYSIS_DAILY_LIMIT_PER_IP).
 """
 import uuid
 
@@ -12,26 +19,26 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.models.analysis import Analysis
-from app.models.user import User
 from app.schemas.analysis import AiAnalysisResponse, AiFindingSchema
-from app.security.dependencies import get_current_user
 from app.services.ai_service import analyze_pet_photo
-from app.services.pet_service import get_owned_pet_or_404
+from app.services.rate_limiter import enforce_daily_limit
 
 router = APIRouter(tags=["Yapay Zekâ Analizi"])
 
 _ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
 
 
-@router.post("/analysis", response_model=AiAnalysisResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/analysis",
+    response_model=AiAnalysisResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(enforce_daily_limit)],
+)
 async def analyze_photo(
     photo: UploadFile = File(...),
-    pet_id: str = Form(...),
-    current_user: User = Depends(get_current_user),
+    pet_id: str = Form(..., alias="petId"),
     db: Session = Depends(get_db),
 ) -> AiAnalysisResponse:
-    get_owned_pet_or_404(db, pet_id, current_user)
-
     if photo.content_type not in _ALLOWED_CONTENT_TYPES:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
@@ -51,7 +58,6 @@ async def analyze_photo(
     analysis = Analysis(
         id=str(uuid.uuid4()),
         pet_id=pet_id,
-        user_id=current_user.id,
         findings=[finding.model_dump(by_alias=True) for finding in result.findings],
         vet_recommendation=result.vet_recommendation,
         preventive_care_recommendation=result.preventive_care_recommendation,
@@ -67,16 +73,21 @@ async def analyze_photo(
 
 @router.get("/history", response_model=list[AiAnalysisResponse])
 def get_analysis_history(
-    pet_id: str | None = None,
-    current_user: User = Depends(get_current_user),
+    pet_id: str,
     db: Session = Depends(get_db),
 ) -> list[AiAnalysisResponse]:
-    query = db.query(Analysis).filter(Analysis.user_id == current_user.id)
-    if pet_id is not None:
-        get_owned_pet_or_404(db, pet_id, current_user)
-        query = query.filter(Analysis.pet_id == pet_id)
-
-    analyses = query.order_by(Analysis.created_at.desc()).all()
+    """
+    NOT: Artık hesap/kullanıcı kavramı olmadığından bu uç nokta yalnızca
+    `pet_id` ile filtreler (aksi halde herkesin analizleri karışırdı).
+    Android istemcisi zaten geçmişi yerel veritabanından okuduğu için bu uç
+    nokta pratikte kullanılmaz; geriye dönük uyumluluk için tutulur.
+    """
+    analyses = (
+        db.query(Analysis)
+        .filter(Analysis.pet_id == pet_id)
+        .order_by(Analysis.created_at.desc())
+        .all()
+    )
     return [_to_response(analysis) for analysis in analyses]
 
 

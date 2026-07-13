@@ -15,6 +15,7 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import OperationalError
 
 from app.config import settings
 from app.database import Base, engine
@@ -55,9 +56,25 @@ def on_startup() -> None:
     otomatik oluşturur. Üretimde şema değişiklikleri için Alembic migration
     kullanılması önerilir; bu satır mevcut tabloları etkilemez (yalnızca eksik
     olanları oluşturur).
+
+    NOT: Gunicorn birden fazla worker ile çalıştığında (bkz. Procfile/render.yaml),
+    her worker kendi startup event'ini bağımsız çalıştırır. Bu da aynı anda
+    birden fazla worker'ın "tablo var mı?" kontrolünü eş zamanlı yapıp
+    hepsinin "yok" görüp CREATE TABLE denemesine (ve SQLite'ta
+    "table already exists" hatasına) yol açabilir. Bu yarış durumunu (race
+    condition) uygulamayı çökertmeden atlatmak için hatayı yakalayıp
+    yalnızca logluyoruz; tablo zaten başka bir worker tarafından oluşturulmuş
+    olur.
     """
-    Base.metadata.create_all(bind=engine)
-    logger.info("Veritabanı tabloları hazır (%s).", settings.database_url.split("://")[0])
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Veritabanı tabloları hazır (%s).", settings.database_url.split("://")[0])
+    except OperationalError as exc:
+        logger.warning(
+            "Veritabanı tabloları oluşturulurken bir uyarı alındı (muhtemelen "
+            "başka bir worker tarafından zaten oluşturuldu, göz ardı ediliyor): %s",
+            exc,
+        )
 
 
 @app.get("/", tags=["Sağlık Kontrolü"])

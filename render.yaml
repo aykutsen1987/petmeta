@@ -8,6 +8,14 @@
 # NOT: GROQ_API_KEY ve SECRET_KEY gibi hassas değerler burada YAZILMAZ;
 # `sync: false` olarak işaretlenmiştir ve Render Dashboard > Environment
 # sekmesinden manuel olarak girilmelidir.
+#
+# NOT (PYTHON_VERSION): Render, yeni servislerde varsayılan olarak en güncel
+# Python sürümünü (örn. 3.14) kullanır. pydantic-core gibi bazı bağımlılıkların
+# bu çok yeni sürüm için henüz hazır (prebuilt) wheel dosyası olmayabilir; bu
+# durumda pip, paketi kaynaktan (Rust/maturin ile) derlemeye çalışır ve Render'ın
+# salt-okunur derleme ortamında bu derleme başarısız olur
+# ("Read-only file system" / "maturin failed" hatası). Bunu önlemek için
+# PYTHON_VERSION aşağıda sabit, bilinen-uyumlu bir sürüme (3.12.7) sabitlenmiştir.
 
 databases:
   - name: petmeta-db
@@ -23,9 +31,11 @@ services:
     region: frankfurt
     branch: main
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --workers 2 --timeout 60"
+    startCommand: "gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --workers 1 --timeout 60"
     healthCheckPath: /health
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
       - key: ENVIRONMENT
         value: production
       - key: DEBUG
@@ -52,3 +62,5 @@ services:
         value: "https://api.groq.com/openai/v1"
       - key: MAX_UPLOAD_SIZE_MB
         value: "8"
+      - key: ANALYSIS_DAILY_LIMIT_PER_IP
+        value: "5"

@@ -20,4 +20,3 @@ class User(Base):
     )
 
     pets = relationship("Pet", back_populates="owner", cascade="all, delete-orphan")
-    analyses = relationship("Analysis", back_populates="user", cascade="all, delete-orphan")
