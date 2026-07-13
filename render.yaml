@@ -1,0 +1,54 @@
+# Render.com Blueprint - PetMeta Backend
+#
+# Bu dosya, Render Dashboard > "New +" > "Blueprint" akışıyla, aşağıda
+# tanımlanan web servisini ve yönetilen (managed) PostgreSQL veritabanını
+# otomatik olarak oluşturur. `DATABASE_URL` değeri Render tarafından
+# veritabanı servisinden otomatik olarak enjekte edilir (fromDatabase).
+#
+# NOT: GROQ_API_KEY ve SECRET_KEY gibi hassas değerler burada YAZILMAZ;
+# `sync: false` olarak işaretlenmiştir ve Render Dashboard > Environment
+# sekmesinden manuel olarak girilmelidir.
+
+databases:
+  - name: petmeta-db
+    plan: free
+    databaseName: petmeta
+    user: petmeta
+
+services:
+  - type: web
+    name: petmeta-api
+    runtime: python
+    plan: free
+    region: frankfurt
+    branch: main
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn app.main:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --workers 2 --timeout 60"
+    healthCheckPath: /health
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: petmeta-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: JWT_ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "30"
+      - key: REFRESH_TOKEN_EXPIRE_DAYS
+        value: "30"
+      - key: CORS_ALLOW_ORIGINS
+        value: "*"
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: "llama-3.2-11b-vision-preview"
+      - key: GROQ_API_BASE_URL
+        value: "https://api.groq.com/openai/v1"
+      - key: MAX_UPLOAD_SIZE_MB
+        value: "8"
