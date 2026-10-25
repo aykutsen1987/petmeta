@@ -15,6 +15,8 @@ email-validator==2.2.0
 # Kimlik doğrulama
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+# passlib 1.7.4 ile uyumlu son bcrypt sürümü (bcrypt>=5 kayıt/girişi çökertir).
+bcrypt==4.0.1
 python-multipart==0.0.19
 
 # Yapay zekâ analizi (Groq API çağrıları)

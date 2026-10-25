@@ -1,17 +1,16 @@
 """
 Basit, bellek içi (in-memory) IP bazlı günlük istek limiti.
 
-Yapay zekâ analizi endpoint'i artık hesap/giriş gerektirmediği için
-(bkz. routers/analysis.py), kötüye kullanımı ve buna bağlı Groq maliyetini
-sınırlamak amacıyla her IP adresi için basit bir günlük sayaç tutulur.
+Analiz endpoint'i hesap gerektirmediğinden, kötüye kullanımı ve Groq maliyetini
+sınırlamak için her IP'ye günlük bir kota uygulanır.
 
-NOT: Bu limiter yalnızca tek bir worker/process ile tutarlıdır (bkz.
-render.yaml -> `--workers 1`). Birden fazla worker/instance kullanılırsa her
-biri kendi sayacını tutar ve gerçek limit, tanımlanan değerin worker sayısı
-katı kadar gevşemiş olur. Daha güçlü/kalıcı ve çok-instance'a duyarlı bir
-limit gerekirse Redis gibi paylaşımlı bir depolama kullanılmalıdır.
+- `check_daily_limit` (FastAPI dependency): kotayı TÜKETMEDEN yalnızca kontrol eder.
+- `record_successful_use`: yalnızca analiz BAŞARILI olduğunda çağrılır; böylece
+  Groq hatası veren istekler kullanıcının hakkından düşmez.
+
+NOT: Tek worker ile tutarlıdır (render.yaml / Procfile `--workers 1`). Çok instance
+gerekirse Redis gibi paylaşımlı bir depolama kullanın.
 """
-from collections import defaultdict
 from datetime import date
 from threading import Lock
 
@@ -20,37 +19,40 @@ from fastapi import HTTPException, Request, status
 from app.config import settings
 
 _lock = Lock()
-_daily_counts: dict[str, tuple[date, int]] = defaultdict(lambda: (date.min, 0))
+_daily_counts: dict[str, tuple[date, int]] = {}
 
 
-def _client_key(request: Request) -> str:
-    """Render gibi ters proxy arkasında gerçek istemci IP'sini almaya çalışır."""
+def client_key(request: Request) -> str:
+    """
+    Gerçek istemci IP'si. Render gibi bir ters proxy kendi gördüğü adresi
+    X-Forwarded-For'a EN SONA ekler; ilk değer istemci tarafından sahte yazılabilir,
+    bu yüzden SON değer kullanılır.
+    """
     forwarded_for = request.headers.get("x-forwarded-for")
     if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
+        parts = [p.strip() for p in forwarded_for.split(",") if p.strip()]
+        if parts:
+            return parts[-1]
     return request.client.host if request.client else "unknown"
 
 
-def enforce_daily_limit(request: Request) -> None:
-    """
-    Aynı IP'den gelen istekleri günlük bir üst sınırla sınırlar.
-    Limit aşıldığında 429 Too Many Requests döner.
-    """
+def _prune(today: date) -> None:
+    stale = [k for k, (d, _) in _daily_counts.items() if d != today]
+    for key in stale:
+        del _daily_counts[key]
+
+
+def check_daily_limit(request: Request) -> None:
+    """Günlük kota dolmuşsa 429 döner; kotayı tüketmez."""
     limit = settings.analysis_daily_limit_per_ip
     if limit <= 0:
-        return  # 0 veya negatif değer: limit devre dışı
+        return
 
-    key = _client_key(request)
+    key = client_key(request)
     today = date.today()
-
     with _lock:
-        last_date, count = _daily_counts[key]
-        if last_date != today:
-            count = 0
-        count += 1
-        _daily_counts[key] = (today, count)
-
-        if count > limit:
+        last_date, count = _daily_counts.get(key, (today, 0))
+        if last_date == today and count >= limit:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=(
@@ -58,3 +60,19 @@ def enforce_daily_limit(request: Request) -> None:
                     "aşıldı. Lütfen yarın tekrar deneyin."
                 ),
             )
+
+
+def record_successful_use(request: Request) -> None:
+    """Başarılı bir analizden sonra IP'nin günlük sayacını 1 artırır."""
+    if settings.analysis_daily_limit_per_ip <= 0:
+        return
+
+    key = client_key(request)
+    today = date.today()
+    with _lock:
+        if len(_daily_counts) > 10_000:
+            _prune(today)
+        last_date, count = _daily_counts.get(key, (today, 0))
+        if last_date != today:
+            count = 0
+        _daily_counts[key] = (today, count + 1)

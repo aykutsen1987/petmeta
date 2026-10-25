@@ -1,43 +1,69 @@
 """
-Yapay zekâ analizi uç noktaları - Android PetMetaApiService.analyzePhoto/getAnalysisHistory ile eşleşir.
+Yapay zekâ analizi uç noktası - Android PetMetaApiService.analyzePhoto ile eşleşir.
 
-Groq API anahtarı YALNIZCA burada, backend tarafında kullanılır; Android
-istemcisi yalnızca fotoğrafı ve pet_id'yi gönderir (bkz. ai_service.py).
+Groq API anahtarı YALNIZCA burada, backend tarafında kullanılır; Android istemcisi
+yalnızca fotoğrafı, pet_id'yi ve (isteğe bağlı) türü gönderir.
 
-NOT (hesapsız/girişsiz kullanım): Bu uç noktalar bilinçli olarak hesap/giriş
-gerektirmez — analiz geçmişi zaten yalnızca Android'in kendi yerel Room
-veritabanında tutulur (bkz. AnalysisRepository.kt), backend yalnızca tek
-seferlik Groq çağrısı için kullanılır. Kötüye kullanımı/aşırı Groq maliyetini
-önlemek için basit bir IP bazlı günlük istek limiti uygulanır
-(bkz. services/rate_limiter.py, ayar: ANALYSIS_DAILY_LIMIT_PER_IP).
+Gizlilik (bilinçli tasarım): Bu uç nokta hesap/giriş gerektirmez ve analiz sonuçları
+veya fotoğraflar backend'de SAKLANMAZ. Geçmiş yalnızca cihazın yerel (şifreli) Room
+veritabanında tutulur. (Eski `/history` uç noktası kaldırıldı: istemci pet_id'leri
+tahmin edilebilir sayılar olduğundan başkalarının sonuçlarının okunmasına yol açıyordu.)
+Kötüye kullanım/maliyet, IP bazlı günlük limitle sınırlanır (bkz. services/rate_limiter.py).
 """
+import logging
 import uuid
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 
 from app.config import settings
-from app.database import get_db
-from app.models.analysis import Analysis
-from app.schemas.analysis import AiAnalysisResponse, AiFindingSchema
-from app.services.ai_service import analyze_pet_photo
-from app.services.rate_limiter import enforce_daily_limit
+from app.schemas.analysis import AiAnalysisResponse
+from app.services.ai_service import AiUnavailableError, analyze_pet_photo
+from app.services.rate_limiter import check_daily_limit, record_successful_use
+
+logger = logging.getLogger("petmeta.analysis")
 
 router = APIRouter(tags=["Yapay Zekâ Analizi"])
 
 _ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
+_CHUNK = 64 * 1024
+
+
+def _sniff_image_type(data: bytes) -> str | None:
+    """İstemcinin beyan ettiği Content-Type'a güvenmeden dosya imzasından (magic bytes) tür bulur."""
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+async def _read_limited(photo: UploadFile, max_bytes: int) -> bytes:
+    """Dosyayı parça parça okur; sınır aşılırsa belleği doldurmadan 413 döner."""
+    buffer = bytearray()
+    while chunk := await photo.read(_CHUNK):
+        buffer.extend(chunk)
+        if len(buffer) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Fotoğraf boyutu {settings.max_upload_size_mb}MB sınırını aşıyor.",
+            )
+    return bytes(buffer)
 
 
 @router.post(
     "/analysis",
     response_model=AiAnalysisResponse,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(enforce_daily_limit)],
+    dependencies=[Depends(check_daily_limit)],
 )
 async def analyze_photo(
+    request: Request,
     photo: UploadFile = File(...),
-    pet_id: str = Form(..., alias="petId"),
-    db: Session = Depends(get_db),
+    pet_id: str = Form(..., alias="petId", max_length=64),
+    species: str | None = Form(None, max_length=32),
 ) -> AiAnalysisResponse:
     if photo.content_type not in _ALLOWED_CONTENT_TYPES:
         raise HTTPException(
@@ -45,61 +71,32 @@ async def analyze_photo(
             detail="Yalnızca JPEG, PNG veya WEBP formatında fotoğraflar desteklenir.",
         )
 
-    photo_bytes = await photo.read()
-    max_bytes = settings.max_upload_size_mb * 1024 * 1024
-    if len(photo_bytes) > max_bytes:
+    photo_bytes = await _read_limited(photo, settings.max_upload_size_mb * 1024 * 1024)
+    real_type = _sniff_image_type(photo_bytes)
+    if real_type is None:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"Fotoğraf boyutu {settings.max_upload_size_mb}MB sınırını aşıyor.",
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Dosya geçerli bir JPEG, PNG veya WEBP görseli değil.",
         )
 
-    result = await analyze_pet_photo(photo_bytes, photo.content_type)
+    try:
+        result = await analyze_pet_photo(photo_bytes, real_type, species)
+    except AiUnavailableError as exc:
+        logger.error("AI analizi başarısız: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Yapay zekâ analizi şu anda kullanılamıyor. Lütfen daha sonra tekrar deneyin.",
+        ) from exc
 
-    analysis = Analysis(
-        id=str(uuid.uuid4()),
+    record_successful_use(request)
+
+    return AiAnalysisResponse(
+        analysis_id=str(uuid.uuid4()),
         pet_id=pet_id,
-        findings=[finding.model_dump(by_alias=True) for finding in result.findings],
+        findings=result.findings,
         vet_recommendation=result.vet_recommendation,
         preventive_care_recommendation=result.preventive_care_recommendation,
         nutrition_recommendation=result.nutrition_recommendation,
         hygiene_recommendation=result.hygiene_recommendation,
-    )
-    db.add(analysis)
-    db.commit()
-    db.refresh(analysis)
-
-    return _to_response(analysis)
-
-
-@router.get("/history", response_model=list[AiAnalysisResponse])
-def get_analysis_history(
-    pet_id: str,
-    db: Session = Depends(get_db),
-) -> list[AiAnalysisResponse]:
-    """
-    NOT: Artık hesap/kullanıcı kavramı olmadığından bu uç nokta yalnızca
-    `pet_id` ile filtreler (aksi halde herkesin analizleri karışırdı).
-    Android istemcisi zaten geçmişi yerel veritabanından okuduğu için bu uç
-    nokta pratikte kullanılmaz; geriye dönük uyumluluk için tutulur.
-    """
-    analyses = (
-        db.query(Analysis)
-        .filter(Analysis.pet_id == pet_id)
-        .order_by(Analysis.created_at.desc())
-        .all()
-    )
-    return [_to_response(analysis) for analysis in analyses]
-
-
-def _to_response(analysis: Analysis) -> AiAnalysisResponse:
-    return AiAnalysisResponse(
-        analysis_id=analysis.id,
-        pet_id=analysis.pet_id,
-        findings=[AiFindingSchema.model_validate(item) for item in analysis.findings],
-        vet_recommendation=analysis.vet_recommendation,
-        preventive_care_recommendation=analysis.preventive_care_recommendation,
-        nutrition_recommendation=analysis.nutrition_recommendation,
-        hygiene_recommendation=analysis.hygiene_recommendation,
-        disclaimer=analysis.disclaimer,
-        created_at=analysis.created_at,
+        created_at=datetime.now(timezone.utc),
     )

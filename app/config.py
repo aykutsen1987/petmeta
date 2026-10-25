@@ -8,6 +8,7 @@ değerler Dashboard > Environment sekmesinden veya render.yaml üzerinden enjekt
 """
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,7 +36,7 @@ class Settings(BaseSettings):
     # ---------- Yapay Zekâ Analizi (Groq) ----------
     # NOT: Bu anahtar YALNIZCA backend'de tutulur; Android istemcisi asla erişemez.
     groq_api_key: str = ""
-    groq_model: str = "llama-3.2-11b-vision-preview"
+    groq_model: str = "qwen/qwen3.8-27b"
     groq_api_base_url: str = "https://api.groq.com/openai/v1"
 
     # ---------- Dosya Yükleme ----------
@@ -49,6 +50,15 @@ class Settings(BaseSettings):
     analysis_daily_limit_per_ip: int = 5
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    @model_validator(mode="after")
+    def _validate_production(self) -> "Settings":
+        """Production'da güvensiz varsayılan JWT anahtarıyla açılmayı engeller."""
+        if self.environment == "production" and (
+            self.secret_key.startswith("CHANGE_ME") or len(self.secret_key) < 32
+        ):
+            raise ValueError("Production için güçlü bir SECRET_KEY tanımlanmalıdır (en az 32 karakter).")
+        return self
 
     @property
     def cors_origins_list(self) -> list[str]:

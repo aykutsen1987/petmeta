@@ -43,7 +43,8 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
-    allow_credentials=True,
+    # '*' ile allow_credentials=True birlikte kullanılamaz/güvensizdir; JWT zaten Authorization başlığıyla gelir.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

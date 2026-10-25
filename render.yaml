@@ -53,11 +53,11 @@ services:
       - key: REFRESH_TOKEN_EXPIRE_DAYS
         value: "30"
       - key: CORS_ALLOW_ORIGINS
-        value: "*"
+        value: "*" # Yalnızca mobil istemci var; web paneli eklenirse kısıtlayın.
       - key: GROQ_API_KEY
         sync: false
       - key: GROQ_MODEL
-        value: "llama-3.2-11b-vision-preview"
+        value: "qwen/qwen3.8-27b"
       - key: GROQ_API_BASE_URL
         value: "https://api.groq.com/openai/v1"
       - key: MAX_UPLOAD_SIZE_MB

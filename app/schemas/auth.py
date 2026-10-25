@@ -6,7 +6,7 @@ from app.schemas.base import CamelModel
 
 class RegisterRequest(CamelModel):
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=8, max_length=72)  # bcrypt sınırı: 72 bayt
     full_name: str = Field(min_length=1, max_length=255)
 
 
